@@ -885,7 +885,11 @@ class TickerBase:
         ratio = df2_data / median
         ratio_rounded = (ratio / 20).round() * 20  # round ratio to nearest 20
         f = ratio_rounded == 100
-        if not f.any():
+        ratio_rcp = 1.0/ratio
+        ratio_rcp_rounded = (ratio_rcp / 20).round() * 20  # round ratio to nearest 20
+        f_rcp = (ratio_rounded == 100) | (ratio_rcp_rounded == 100)
+        f_either = f | f_rcp
+        if not f_either.any():
             logger.info("price-repair-100x: No sporadic 100x errors")
             if "Repaired?" not in df.columns:
                 df["Repaired?"] = False
@@ -894,7 +898,7 @@ class TickerBase:
         # Mark values to send for repair
         tag = -1.0
         for i in range(len(data_cols)):
-            fi = f[:, i]
+            fi = f_either[:, i]
             c = data_cols[i]
             df2.loc[fi, c] = tag
 
@@ -906,35 +910,43 @@ class TickerBase:
         if n_after > 0:
             # This second pass will *crudely* "fix" any remaining errors in High/Low
             # simply by ensuring they don't contradict e.g. Low = 100x High.
-            f = df2_tagged
+            f = (df2[data_cols].to_numpy() == tag) & f
             for i in range(f.shape[0]):
                 fi = f[i, :]
                 if not fi.any():
                     continue
                 idx = df2.index[i]
 
-                c = "Open"
-                j = data_cols.index(c)
-                if fi[j]:
-                    df2.loc[idx, c] = df.loc[idx, c] * 0.01
-                #
-                c = "Close"
-                j = data_cols.index(c)
-                if fi[j]:
-                    df2.loc[idx, c] = df.loc[idx, c] * 0.01
-                #
-                c = "Adj Close"
-                j = data_cols.index(c)
-                if fi[j]:
-                    df2.loc[idx, c] = df.loc[idx, c] * 0.01
-                #
-                c = "High"
-                j = data_cols.index(c)
+                for c in ['Open', 'Close']:
+                    j = data_cols.index(c)
+                    if fi[j]:
+                        df2.loc[idx, c] = df.loc[idx, c] * 0.01
+
+                c = "High" ; j = data_cols.index(c)
                 if fi[j]:
                     df2.loc[idx, c] = df2.loc[idx, ["Open", "Close"]].max()
-                #
-                c = "Low"
-                j = data_cols.index(c)
+
+                c = "Low" ; j = data_cols.index(c)
+                if fi[j]:
+                    df2.loc[idx, c] = df2.loc[idx, ["Open", "Close"]].min()
+
+            f_rcp = (df2[data_cols].to_numpy() == tag) & f_rcp
+            for i in range(f_rcp.shape[0]):
+                fi = f_rcp[i, :]
+                if not fi.any():
+                    continue
+                idx = df2.index[i]
+
+                for c in ['Open', 'Close']:
+                    j = data_cols.index(c)
+                    if fi[j]:
+                        df2.loc[idx, c] = df.loc[idx, c] * 100.0
+
+                c = "High" ; j = data_cols.index(c)
+                if fi[j]:
+                    df2.loc[idx, c] = df2.loc[idx, ["Open", "Close"]].max()
+
+                c = "Low" ; j = data_cols.index(c)
                 if fi[j]:
                     df2.loc[idx, c] = df2.loc[idx, ["Open", "Close"]].min()
 
@@ -953,9 +965,9 @@ class TickerBase:
             logger.info('price-repair-100x: ' + report_msg)
 
         # Restore original values where repair failed
-        f = df2_tagged
+        f_either = df2[data_cols].to_numpy() == tag
         for j in range(len(data_cols)):
-            fj = f[:, j]
+            fj = f_either[:, j]
             if fj.any():
                 c = data_cols[j]
                 df2.loc[fj, c] = df.loc[fj, c]
@@ -976,14 +988,6 @@ class TickerBase:
         # - a sudden switch between $<->cents at some date
         # This function fixes the second.
         # Eventually Yahoo fixes but could take them 2 weeks.
-
-        # To detect, use 'bad split adjustment' algorithm. But only correct
-        # if no stock splits in data
-
-        f_splits = df['Stock Splits'].to_numpy() != 0.0
-        if f_splits.any():
-            utils.get_yf_logger().debug('price-repair-100x: Cannot check for chunked 100x errors because splits present')
-            return df
 
         return self._fix_prices_sudden_change(df, interval, tz_exchange, 100.0)
 
@@ -1262,11 +1266,19 @@ class TickerBase:
             # Avoid using 'Low' and 'High'. For multiday intervals, these can be 
             # very volatile so reduce ability to detect genuine stock split errors
             _1d_change_x = np.full((n, 2), 1.0)
-            price_data = df2[['Open','Close']].replace(0.0, 1.0).to_numpy()
+            price_data = df2[['Open','Close']].to_numpy()
+            f_zero = price_data == 0.0
         else:
             _1d_change_x = np.full((n, 4), 1.0)
-            price_data = df2[OHLC].replace(0.0, 1.0).to_numpy()
+            price_data = df2[OHLC].to_numpy()
+            f_zero = price_data == 0.0
+        if f_zero.any():
+            price_data[f_zero] = 1.0
+
         _1d_change_x[1:] = price_data[1:, ] / price_data[:-1, ]
+        f_zero_num_denom = f_zero | np.roll(f_zero, 1, axis=0)
+        if f_zero_num_denom.any():
+            _1d_change_x[f_zero_num_denom] = 1.0
         if interday and interval != '1d':
             # average change
             _1d_change_minx = np.average(_1d_change_x, axis=1)
@@ -1364,6 +1376,29 @@ class TickerBase:
         if not f.any():
             logger.info(f'price-repair-split: No {fix_type}s detected')
             return df
+
+        # Update: if any 100x changes are soon after a stock split, so could be confused with split error, then abort
+        threshold_days = 30
+        f_splits = df['Stock Splits'].to_numpy() != 0.0
+        if change in [100.0, 0.01] and f_splits.any():
+            indices_A = np.where(f_splits)[0]
+            indices_B = np.where(f)[0]
+            if not len(indices_A) or not len(indices_B):
+                return None
+            gaps = indices_B[:, None] - indices_A
+            # Because data is sorted in DEscending order, need to flip gaps
+            gaps *= -1
+            f_pos = gaps > 0
+            if f_pos.any():
+                gap_min = gaps[f_pos].min()
+                gap_td = utils._interval_to_timedelta(interval) * gap_min
+                if isinstance(gap_td, _dateutil.relativedelta.relativedelta):
+                    threshold = _dateutil.relativedelta.relativedelta(days=threshold_days)
+                else:
+                    threshold = _datetime.timedelta(days=threshold_days)
+                if gap_td < threshold:
+                    logger.info(f'price-repair-split: 100x changes are too soon after stock split events, aborting')
+                    return df
 
         # if logger.isEnabledFor(logging.DEBUG):
         #     df_debug['i'] = list(range(0, df_debug.shape[0]))
