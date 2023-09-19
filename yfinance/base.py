@@ -829,6 +829,8 @@ class TickerBase:
 
     @utils.log_indent_decorator
     def _fix_unit_mixups(self, df, interval, tz_exchange, prepost):
+        if df.empty:
+            return df
         df2 = self._fix_unit_switch(df, interval, tz_exchange)
         df3 = self._fix_unit_random_mixups(df2, interval, tz_exchange, prepost)
         return df3
@@ -841,6 +843,9 @@ class TickerBase:
         # - random 100x errors spread throughout table
         # - a sudden switch between $<->cents at some date
         # This function fixes the first.
+
+        if df.empty:
+            return df
 
         # Easy to detect and fix, just look for outliers = ~100x local median
         logger = utils.get_yf_logger()
@@ -993,6 +998,9 @@ class TickerBase:
         # But most times when prices=0 or NaN returned is because no trades.
         # Impossible to distinguish, so only attempt repair if few or rare.
 
+        if df.empty:
+            return df
+
         logger = utils.get_yf_logger()
 
         if df.shape[0] == 0:
@@ -1101,6 +1109,9 @@ class TickerBase:
         # Easy to detect and correct BUT ONLY IF the data 'df' includes today's dividend.
         # E.g. if fetching historic prices before todays dividend, then cannot fix.
 
+        if df.empty:
+            return df
+
         logger = utils.get_yf_logger()
 
         if df is None or df.empty:
@@ -1173,6 +1184,9 @@ class TickerBase:
         # which direction to reverse adjustment - have to analyse prices and detect. 
         # Not difficult.
 
+        if df.empty:
+            return df
+            
         logger = utils.get_yf_logger()
 
         interday = interval in ['1d', '1wk', '1mo', '3mo']
@@ -1198,6 +1212,9 @@ class TickerBase:
 
     @utils.log_indent_decorator
     def _fix_prices_sudden_change(self, df, interval, tz_exchange, change, correct_volume=False):
+        if df.empty:
+            return df
+            
         logger = utils.get_yf_logger()
 
         df = df.sort_index(ascending=False)
